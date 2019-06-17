@@ -91,6 +91,34 @@ public class MainActivity extends AppCompatActivity {
     mAuthorize.setOnClickListener(new AuthorizeListener());
   }
 
+  @Override
+  protected void onStart() {
+    super.onStart();
+    checkIntent(getIntent());
+  }
+
+  @Override
+  protected void onNewIntent(Intent intent) {
+      super.onNewIntent(intent);
+      checkIntent(intent);
+  }
+
+  private void checkIntent(@Nullable Intent intent) {
+    if (intent != null) {
+      String action = intent.getAction();
+      switch (action) {
+        case "com.google.codelabs.appauth.HANDLE_AUTHORIZATION_RESPONSE":
+          if (!intent.hasExtra(USED_INTENT)) {
+            handleAuthorizationResponse(intent);
+            intent.putExtra(USED_INTENT, true);
+          }
+          break;
+        default:
+            // NOP
+      }
+    }
+  }
+
   private void enablePostAuthorizationFlows() {
     mAuthState = restoreAuthState();
     if (mAuthState != null && mAuthState.isAuthorized()) {
@@ -116,7 +144,28 @@ public class MainActivity extends AppCompatActivity {
   private void handleAuthorizationResponse(@NonNull Intent intent) {
 
     // code from the step 'Handle the Authorization Response' goes here.
+    AuthorizationResponse response = AuthorizationResponse.fromIntent(intent);
+    AuthorizationException error = AuthorizationException.fromIntent(intent);
+    final AuthState authState = new AuthState(response, error);
 
+    if (response != null) {
+        Log.i(LOG_TAG, String.format("Handled Authorization Response %s", authState.toJsonString()));
+        AuthorizationService service = new AuthorizationService(this);
+        service.performTokenRequest(response.createTokenExchangeRequest(), new AuthorizationService.TokenResponseCallback() {
+            @Override
+            public void onTokenRequestCompleted(@Nullable TokenResponse tokenResponse, @Nullable AuthorizationException e) {
+                if (e != null) {
+                    Log.w(LOG_TAG, "Token Exchange failed", e);
+                } else {
+                    if (tokenResponse != null) {
+                        authState.update(tokenResponse, e);
+                        persistAuthState(authState);
+                        Log.i(LOG_TAG, String.format("Token Response [ Access Token: %s, ID Token: %s", tokenResponse.accessToken, tokenResponse.idToken));
+                    }
+                }
+            }
+        });
+    }
   }
 
   private void persistAuthState(@NonNull AuthState authState) {
@@ -213,7 +262,65 @@ public class MainActivity extends AppCompatActivity {
     public void onClick(View view) {
 
       // code from the section 'Making API Calls' goes here
+      mAuthState.performActionWithFreshTokens(mAuthorizationService, new AuthState.AuthStateAction() {
+        @Override
+        public void execute(@Nullable  String accessToken, @Nullable  String idToken, @Nullable  AuthorizationException e) {
+          new AsyncTask<String, Void, JSONObject>() {
+            @Override
+            protected JSONObject doInBackground(String... tokens) {
+              OkHttpClient client = new OkHttpClient();
+              Request request = new Request.Builder()
+                      .url("https://www.googleapis.com/oauth2/v3/userinfo")
+                      .addHeader("Authorization", String.format("Bearer %s", tokens[0]))
+                      .build();
 
+              try {
+                Response response = client.newCall(request).execute();
+                String jsonBody = response.body().string();
+                Log.i(LOG_TAG, String.format("User Info Response %s", jsonBody));
+                return new JSONObject(jsonBody);
+              } catch (Exception e) {
+                Log.w(LOG_TAG, e);
+              }
+              return null;
+            }
+
+            @Override
+            protected void onPostExecute(JSONObject userInfo) {
+              if (userInfo != null) {
+                String fullName = userInfo.optString("name", null);
+                String givenName = userInfo.optString("given_name", null);
+                String familyName = userInfo.optString("family_name", null);
+                String imageUrl = userInfo.optString("picture", null);
+                if (!TextUtils.isEmpty(imageUrl)) {
+                  Picasso.with(mMainActivity)
+                          .load(imageUrl)
+                          .placeholder(R.drawable.ic_account_circle_black_48dp)
+                          .into(mMainActivity.mProfileView);
+                }
+                if (!TextUtils.isEmpty(fullName)) {
+                  mMainActivity.mFullName.setText(fullName);
+                }
+                if (!TextUtils.isEmpty(givenName)) {
+                  mMainActivity.mGivenName.setText(givenName);
+                }
+                if (!TextUtils.isEmpty(familyName)) {
+                  mMainActivity.mFamilyName.setText(familyName);
+                }
+
+                String message;
+                if (userInfo.has("error")) {
+                  message = String.format("%s [%s]", mMainActivity.getString(R.string.request_failed), userInfo.optString("error_description", "No description))"));
+                } else {
+                  message = mMainActivity.getString(R.string.request_complete);
+                }
+                Snackbar.make(mMainActivity.mProfileView, message, Snackbar.LENGTH_SHORT)
+                        .show();
+              }
+            }
+          }.execute(accessToken);
+        }
+      });
     }
   }
 }
