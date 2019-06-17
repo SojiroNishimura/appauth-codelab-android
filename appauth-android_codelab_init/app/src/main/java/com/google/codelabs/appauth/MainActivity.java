@@ -15,23 +15,28 @@
 package com.google.codelabs.appauth;
 
 import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.RestrictionsManager;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Bundle;
-import android.os.PersistableBundle;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import com.google.android.material.snackbar.Snackbar;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.AppCompatButton;
 import androidx.appcompat.widget.AppCompatTextView;
+
+import android.os.UserManager;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageView;
+import android.widget.Toast;
 
 import com.squareup.picasso.Picasso;
 
@@ -46,6 +51,9 @@ import net.openid.appauth.TokenResponse;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -57,6 +65,7 @@ public class MainActivity extends AppCompatActivity {
   private static final String SHARED_PREFERENCES_NAME = "AuthStatePreference";
   private static final String AUTH_STATE = "AUTH_STATE";
   private static final String USED_INTENT = "USED_INTENT";
+  private static final String LOGIN_HINT = "login_hint";
 
   MainApplication mMainApplication;
 
@@ -71,6 +80,8 @@ public class MainActivity extends AppCompatActivity {
   AppCompatTextView mFamilyName;
   AppCompatTextView mFullName;
   ImageView mProfileView;
+  String mLoginHint;
+  private BroadcastReceiver mRestrictionsReceiver;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
@@ -88,19 +99,40 @@ public class MainActivity extends AppCompatActivity {
     enablePostAuthorizationFlows();
 
     // wire click listeners
-    mAuthorize.setOnClickListener(new AuthorizeListener());
+    mAuthorize.setOnClickListener(new AuthorizeListener(this));
+    getAppRestrictions();
   }
 
   @Override
   protected void onStart() {
     super.onStart();
     checkIntent(getIntent());
+    registerRestrictionsReceiver();
   }
 
   @Override
   protected void onNewIntent(Intent intent) {
       super.onNewIntent(intent);
       checkIntent(intent);
+  }
+
+  @Override
+  protected void onResume() {
+    super.onResume();
+
+    // Retrieve app restrictions and take appropriate action
+    getAppRestrictions();
+
+    // Register a receiver for app restrictions changed broadcast
+    registerRestrictionsReceiver();
+  }
+
+  @Override
+  protected void onStop() {
+    super.onStop();
+
+    // Unregister receiver for app restrictions changed broadcast
+    unregisterReceiver(mRestrictionsReceiver);
   }
 
   private void checkIntent(@Nullable Intent intent) {
@@ -196,10 +228,45 @@ public class MainActivity extends AppCompatActivity {
     return null;
   }
 
+  private void getAppRestrictions() {
+    RestrictionsManager restrictionsManager = (RestrictionsManager) this.getSystemService(Context.RESTRICTIONS_SERVICE);
+    Bundle appRestrictions = restrictionsManager.getApplicationRestrictions();
+
+    if (!appRestrictions.isEmpty()) {
+      if (appRestrictions.getBoolean(UserManager.KEY_RESTRICTIONS_PENDING) != true) {
+        mLoginHint = appRestrictions.getString(LOGIN_HINT);
+      } else {
+        Toast.makeText(this, R.string.restrictions_pending_block_user, Toast.LENGTH_LONG).show();
+        finish();
+      }
+    }
+  }
+
+  private void registerRestrictionsReceiver() {
+    IntentFilter restrictionsFilter = new IntentFilter(Intent.ACTION_APPLICATION_RESTRICTIONS_CHANGED);
+    mRestrictionsReceiver = new BroadcastReceiver() {
+      @Override
+      public void onReceive(Context context, Intent intent) {
+        getAppRestrictions();
+      }
+    };
+    registerReceiver(mRestrictionsReceiver, restrictionsFilter);
+  }
+
+  public String getLoginHint() {
+    return mLoginHint;
+  }
+
   /**
    * Kicks off the authorization flow.
    */
   public static class AuthorizeListener implements Button.OnClickListener {
+    private final MainActivity mMainActivity;
+
+    public AuthorizeListener(@NonNull MainActivity mainActivity) {
+      mMainActivity = mainActivity;
+    }
+
     @Override
     public void onClick(View view) {
 
@@ -219,6 +286,15 @@ public class MainActivity extends AppCompatActivity {
               redirectUri
       );
       builder.setScopes("profile");
+
+      if (mMainActivity.getLoginHint() != null) {
+        Map loginHintMap = new HashMap<String, String>();
+        loginHintMap.put(LOGIN_HINT, mMainActivity.getLoginHint());
+        builder.setAdditionalParameters(loginHintMap);
+
+        Log.i(LOG_TAG, String.format("login_hint: %s", mMainActivity.getLoginHint()));
+      }
+
       AuthorizationRequest request = builder.build();
 
       AuthorizationService service = new AuthorizationService(view.getContext());
